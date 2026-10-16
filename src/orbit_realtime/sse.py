@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -99,6 +100,7 @@ class SSEStream(AsyncIterator[bytes]):
             raise TypeError("event iterator cleanup must be an async callable.")
         self._events = iterator
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def __aiter__(self) -> SSEStream:
         """Return this single-consumer asynchronous iterator."""
@@ -126,13 +128,37 @@ class SSEStream(AsyncIterator[bytes]):
             raise
 
     async def aclose(self) -> None:
-        """Close the upstream iterator once; response disconnect cleanup reaches this method."""
-        if self._closed:
-            return
-        self._closed = True
-        close = getattr(self._events, "aclose", None)
-        if close is not None:
-            await close()
+        """Close the upstream iterator once and finish cleanup before propagating cancellation.
+
+        The first caller creates the close task; concurrent callers join it. Shielding keeps a
+        cancelled response task from abandoning an async generator's ``finally`` block or another
+        source-specific resource release. Cancellation is re-raised after the shared close task
+        finishes. If the source close fails or is cancelled, a later call starts a new cleanup
+        attempt while the stream remains unavailable for reads.
+        """
+        task = self._close_task
+        retry_failed_close = (
+            task is not None and task.done() and (task.cancelled() or task.exception() is not None)
+        )
+        if task is None or retry_failed_close:
+            self._closed = True
+            close = getattr(self._events, "aclose", None)
+            if close is None:
+                self._close_task = None
+                return
+            task = asyncio.create_task(close())
+            self._close_task = task
+
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     def __repr__(self) -> str:
         """Describe stream lifecycle without exposing the source or event payloads."""

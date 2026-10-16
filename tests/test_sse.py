@@ -134,6 +134,75 @@ async def test_response_stream_closes_upstream_after_disconnect_cancellation() -
     assert await stream.aclose() is None
 
 
+async def test_stream_cleanup_is_shared_and_finishes_before_cancellation_propagates() -> None:
+    """A cancelled closer cannot strand or duplicate an upstream resource cleanup."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Source:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def __aiter__(self) -> Source:
+            return self
+
+        async def __anext__(self) -> SSEEvent:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            started.set()
+            await release.wait()
+
+    source = Source()
+    stream = SSEStream(source)
+    cancelled = asyncio.create_task(stream.aclose())
+    await started.wait()
+    waiter = asyncio.create_task(stream.aclose())
+    cancelled.cancel()
+    await asyncio.sleep(0)
+    assert not cancelled.done()
+    assert not waiter.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    await waiter
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_source_cleanup_can_be_retried() -> None:
+    """A source close failure remains retryable while the stream rejects further reads."""
+
+    class FailOnceSource:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def __aiter__(self) -> FailOnceSource:
+            return self
+
+        async def __anext__(self) -> SSEEvent:
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("temporary source close failure")
+
+    source = FailOnceSource()
+    stream = SSEStream(source)
+    with pytest.raises(RuntimeError, match="temporary source close failure"):
+        await stream.aclose()
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    await stream.aclose()
+    await stream.aclose()
+    assert source.close_calls == 2
+
+
 async def test_invalid_source_value_closes_upstream_before_failing() -> None:
     closed = asyncio.Event()
 

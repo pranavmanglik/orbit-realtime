@@ -2,7 +2,7 @@
 
 `orbit-realtime` currently provides bounded Server-Sent Events framing over Orbit Core's native
 ASGI streaming response. It does not add a web framework or a second ASGI server. It supports
-Python 3.11 through 3.14 and is pre-alpha.
+Python 3.11 through 3.14 and is alpha.
 
 ```bash
 python -m pip install orbit-realtime
@@ -35,7 +35,9 @@ async def changes(request: Request) -> Response:
 
 Event payloads are UTF-8 text with a 64 KiB encoded-frame limit. Newlines are represented as
 separate `data:` fields; optional event type, ID, and bounded reconnect delay follow the HTML
-standard event-stream format. Event payloads and IDs are excluded from representations. The response
+standard event-stream format. Omit optional fields with `None`; an explicit empty event name emits
+`event:` and selects the default type, while an explicit empty ID emits `id:` to reset browser
+reconnect state. Go and Rust implementations preserve the same distinction. Event payloads and IDs are excluded from representations. The response
 sets the `text/event-stream` media type, disables cache reuse, and closes the upstream iterator when
 the stream ends, fails, is cancelled, or the client disconnects. Use `encode_comment()` for explicit
 heartbeat frames when the source needs to keep an idle connection open.
